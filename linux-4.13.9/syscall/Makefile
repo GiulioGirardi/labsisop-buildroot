@@ -1,1 +1,1 @@
-obj-y:=processList.o
+obj-y:=processInfo.o

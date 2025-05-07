@@ -3,7 +3,7 @@
 #include <linux/uaccess.h>
 #include <linux/syscalls.h>
 
-asmlinkage long sys_get_sleeping_pids(get_sleeping_pids, pid_t __user *, pids, int, max){
+asmlinkage long sys_get_sleeping_pids(pid_t __user *pids, int, max){
     struct task_struct *task;
     pid_t k_pids[256];
     int count = 0;
