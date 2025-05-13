@@ -1,1 +1,1 @@
-asmlinkage long sys_listProcessInfo(const char __user *buf, int size);
+asmlinkage long sys_printMessage(const char __user *msg);

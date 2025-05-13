@@ -13,170 +13,254 @@
 #include <linux/fs.h>             // Header for the Linux file system support
 #include <linux/uaccess.h>
 
-#define  DEVICE_NAME "simple_driver" ///< The device will appear at /dev/simple_driver using this value
-#define  CLASS_NAME  "simple_class"        ///< The device class -- this is a character device driver
+#define DEVICE_NAME "xtea_driver" ///< The device will appear at /dev/xtea_driver
+#define CLASS_NAME  "xtea_class"  ///< The device class
+#define MAX_MESSAGE_SIZE 512      ///< Max buffer size for input/output messages
 
 MODULE_LICENSE("GPL");            ///< The license type -- this affects available functionality
 MODULE_AUTHOR("Author Name");    ///< The author -- visible when you use modinfo
 MODULE_DESCRIPTION("A generic Linux char driver.");  ///< The description -- see modinfo
 MODULE_VERSION("0.2");            ///< A version number to inform users
 
-static int    majorNumber;                  ///< Stores the device number -- determined automatically
-static char   message[256] = {0};           ///< Memory for the string that is passed from userspace
-static short  size_of_message;              ///< Used to remember the size of the string stored
-static int    numberOpens = 0;              ///< Counts the number of times the device is opened
-static struct class *charClass  = NULL; ///< The device-driver class struct pointer
-static struct device *charDevice = NULL; ///< The device-driver device struct pointer
+// Module parameters for the XTEA key
+static uint32_t key0 = 0x00000000;
+static uint32_t key1 = 0x00000000;
+static uint32_t key2 = 0x00000000;
+static uint32_t key3 = 0x00000000;
+module_param(key0, uint, 0644);
+module_param(key1, uint, 0644);
+module_param(key2, uint, 0644);
+module_param(key3, uint, 0644);
+MODULE_PARM_DESC(key0, "First 32-bit key for XTEA encryption");
+MODULE_PARM_DESC(key1, "Second 32-bit key for XTEA encryption");
+MODULE_PARM_DESC(key2, "Third 32-bit key for XTEA encryption");
+MODULE_PARM_DESC(key3, "Fourth 32-bit key for XTEA encryption");
 
-// The prototype functions for the character driver -- must come before the struct definition
-static int     dev_open(struct inode *, struct file *);
-static int     dev_release(struct inode *, struct file *);
+// Global variables
+static int majorNumber;
+static char *message = NULL;       ///< Dynamic buffer for encrypted data
+static size_t size_of_message;     ///< Size of the stored message
+static int numberOpens = 0;
+static struct class *charClass = NULL;
+static struct device *charDevice = NULL;
+static uint32_t xtea_key[4];       ///< XTEA key set from module parameters
+
+// Function prototypes
+static int dev_open(struct inode *, struct file *);
+static int dev_release(struct inode *, struct file *);
 static ssize_t dev_read(struct file *, char *, size_t, loff_t *);
 static ssize_t dev_write(struct file *, const char *, size_t, loff_t *);
 
+// XTEA encryption functions
+void encipher(uint32_t num_rounds, uint32_t v[2], const uint32_t key[4]) {
+    uint32_t i;
+    uint32_t v0 = v[0], v1 = v[1], sum = 0, delta = 0x9E3779B9;
 
-/** @brief Devices are represented as file structure in the kernel. The file_operations structure from
- *  /linux/fs.h lists the callback functions that you wish to associated with your file operations
- *  using a C99 syntax structure. char devices usually implement open, read, write and release calls
- */
-static struct file_operations fops =
-{
-	.open = dev_open,
-	.read = dev_read,
-	.write = dev_write,
-	.release = dev_release,
+    for (i = 0; i < num_rounds; i++) {
+        v0 += (((v1 << 4) ^ (v1 >> 5)) + v1) ^ (sum + key[sum & 3]);
+        sum += delta;
+        v1 += (((v0 << 4) ^ (v0 >> 5)) + v0) ^ (sum + key[(sum >> 11) & 3]);
+    }
+    v[0] = v0;
+    v[1] = v1;
+}
+
+// File operations structure
+static struct file_operations fops = {
+    .open = dev_open,
+    .read = dev_read,
+    .write = dev_write,
+    .release = dev_release,
 };
 
-
-/** @brief The LKM initialization function
- *  The static keyword restricts the visibility of the function to within this C file. The __init
- *  macro means that for a built-in driver (not a LKM) the function is only used at initialization
- *  time and that it can be discarded and its memory freed up after that point.
- *  @return returns 0 if successful
+/**
+ * @brief Initialize the LKM
  */
-static int __init simple_init(void){
-	printk(KERN_INFO "Simple Driver: Initializing the LKM\n");
+static int __init xtea_init(void) {
+    printk(KERN_INFO "XTEA Driver: Initializing the LKM\n");
 
-	// Try to dynamically allocate a major number for the device -- more difficult but worth it
-	majorNumber = register_chrdev(0, DEVICE_NAME, &fops);
-	if (majorNumber<0){
-		printk(KERN_ALERT "Simple Driver failed to register a major number\n");
-		return majorNumber;
-	}
-	
-	printk(KERN_INFO "Simple Driver: registered correctly with major number %d\n", majorNumber);
+    // Allocate dynamic buffer
+    message = kmalloc(MAX_MESSAGE_SIZE, GFP_KERNEL);
+    if (!message) {
+        printk(KERN_ALERT "XTEA Driver: Failed to allocate memory for message buffer\n");
+        return -ENOMEM;
+    }
+    memset(message, 0, MAX_MESSAGE_SIZE);
 
-	// Register the device class
-	charClass = class_create(THIS_MODULE, CLASS_NAME);
-	if (IS_ERR(charClass)){                // Check for error and clean up if there is
-		unregister_chrdev(majorNumber, DEVICE_NAME);
-		printk(KERN_ALERT "Simple Driver: failed to register device class\n");
-		return PTR_ERR(charClass);          // Correct way to return an error on a pointer
-	}
-	
-	printk(KERN_INFO "Simple Driver: device class registered correctly\n");
+    // Set the XTEA key from module parameters
+    xtea_key[0] = key0;
+    xtea_key[1] = key1;
+    xtea_key[2] = key2;
+    xtea_key[3] = key3;
+    printk(KERN_INFO "XTEA Driver: Key set to %08x %08x %08x %08x\n",
+           xtea_key[0], xtea_key[1], xtea_key[2], xtea_key[3]);
 
-	// Register the device driver
-	charDevice = device_create(charClass, NULL, MKDEV(majorNumber, 0), NULL, DEVICE_NAME);
-	if (IS_ERR(charDevice)){               // Clean up if there is an error
-		class_destroy(charClass);           // Repeated code but the alternative is goto statements
-		unregister_chrdev(majorNumber, DEVICE_NAME);
-		printk(KERN_ALERT "Simple Driver: failed to create the device\n");
-		return PTR_ERR(charDevice);
-	}
-	
-	printk(KERN_INFO "Simple Driver: device class created correctly\n"); // Made it! device was initialized
-		
-	return 0;
+    // Register major number
+    majorNumber = register_chrdev(0, DEVICE_NAME, &fops);
+    if (majorNumber < 0) {
+        kfree(message);
+        printk(KERN_ALERT "XTEA Driver: Failed to register a major number\n");
+        return majorNumber;
+    }
+    printk(KERN_INFO "XTEA Driver: Registered with major number %d\n", majorNumber);
+
+    // Register device class
+    charClass = class_create(THIS_MODULE, CLASS_NAME);
+    if (IS_ERR(charClass)) {
+        unregister_chrdev(majorNumber, DEVICE_NAME);
+        kfree(message);
+        printk(KERN_ALERT "XTEA Driver: Failed to register device class\n");
+        return PTR_ERR(charClass);
+    }
+    printk(KERN_INFO "XTEA Driver: Device class registered\n");
+
+    // Create device
+    charDevice = device_create(charClass, NULL, MKDEV(majorNumber, 0), NULL, DEVICE_NAME);
+    if (IS_ERR(charDevice)) {
+        class_destroy(charClass);
+        unregister_chrdev(majorNumber, DEVICE_NAME);
+        kfree(message);
+        printk(KERN_ALERT "XTEA Driver: Failed to create the device\n");
+        return PTR_ERR(charDevice);
+    }
+    printk(KERN_INFO "XTEA Driver: Device created successfully\n");
+
+    return 0;
 }
 
-
-/** @brief The LKM cleanup function
- *  Similar to the initialization function, it is static. The __exit macro notifies that if this
- *  code is used for a built-in driver (not a LKM) that this function is not required.
+/**
+ * @brief Cleanup the LKM
  */
-static void __exit simple_exit(void){
-	device_destroy(charClass, MKDEV(majorNumber, 0));     // remove the device
-	class_unregister(charClass);                          // unregister the device class
-	class_destroy(charClass);                             // remove the device class
-	unregister_chrdev(majorNumber, DEVICE_NAME);             // unregister the major number
-	printk(KERN_INFO "Simple Driver: goodbye from the LKM!\n");
+static void __exit xtea_exit(void) {
+    device_destroy(charClass, MKDEV(majorNumber, 0));
+    class_unregister(charClass);
+    class_destroy(charClass);
+    unregister_chrdev(majorNumber, DEVICE_NAME);
+    kfree(message);
+    printk(KERN_INFO "XTEA Driver: Goodbye from the LKM!\n");
 }
 
-
-/** @brief The device open function that is called each time the device is opened
- *  This will only increment the numberOpens counter in this case.
- *  @param inodep A pointer to an inode object (defined in linux/fs.h)
- *  @param filep A pointer to a file object (defined in linux/fs.h)
+/**
+ * @brief Device open function
  */
-static int dev_open(struct inode *inodep, struct file *filep){
-	numberOpens++;
-	printk(KERN_INFO "Simple Driver: device has been opened %d time(s)\n", numberOpens);
-	return 0;
+static int dev_open(struct inode *inodep, struct file *filep) {
+    numberOpens++;
+    printk(KERN_INFO "XTEA Driver: Device opened %d time(s)\n", numberOpens);
+    return 0;
 }
 
-
-/** @brief This function is called whenever device is being read from user space i.e. data is
- *  being sent from the device to the user. In this case is uses the copy_to_user() function to
- *  send the buffer string to the user and captures any errors.
- *  @param filep A pointer to a file object (defined in linux/fs.h)
- *  @param buffer The pointer to the buffer to which this function writes the data
- *  @param len The length of the b
- *  @param offset The offset if required
+/**
+ * @brief Device read function
  */
-static ssize_t dev_read(struct file *filep, char *buffer, size_t len, loff_t *offset){
-	int error_count = 0;
-   
-	// copy_to_user has the format ( * to, *from, size) and returns 0 on success
-	error_count = copy_to_user(buffer, message, size_of_message);
+static ssize_t dev_read(struct file *filep, char *buffer, size_t len, loff_t *offset) {
+    int error_count = 0;
 
-	if (error_count==0){            // if true then have success
-		printk(KERN_INFO "Simple Driver: sent %d characters to the user\n", size_of_message);
-		return (size_of_message=0);  // clear the position to the start and return 0
-	}
-	else {
-		printk(KERN_INFO "Simple Driver: failed to send %d characters to the user\n", error_count);
-		return -EFAULT;              // Failed -- return a bad address message (i.e. -14)
-	}
+    if (*offset >= size_of_message) {
+        return 0; // EOF
+    }
+
+    // Copy encrypted data to userspace
+    error_count = copy_to_user(buffer, message, size_of_message);
+
+    if (error_count == 0) {
+        printk(KERN_INFO "XTEA Driver: Sent %zu bytes to user\n", size_of_message);
+        *offset += size_of_message;
+        return size_of_message;
+    } else {
+        printk(KERN_ALERT "XTEA Driver: Failed to send %d bytes to user\n", error_count);
+        return -EFAULT;
+    }
 }
 
-
-/** @brief This function is called whenever the device is being written to from user space i.e.
- *  data is sent to the device from the user. The data is copied to the message[] array in this
- *  LKM using the sprintf() function along with the length of the string.
- *  @param filep A pointer to a file object
- *  @param buffer The buffer to that contains the string to write to the device
- *  @param len The length of the array of data that is being passed in the const char buffer
- *  @param offset The offset if required
+/**
+ * @brief Device write function
+ * Expects input in the format: "enc key0 key1 key2 key3 data_size data"
  */
-static ssize_t dev_write(struct file *filep, const char *buffer, size_t len, loff_t *offset){
-	if (len < sizeof(message)){
-		sprintf(message, "%s(%zu letters)", buffer, len);   // appending received string with its length
-		size_of_message = strlen(message);                 // store the length of the stored message
-		printk(KERN_INFO "Simple Driver: received %zu characters from the user\n", len);
-		
-		return len;
-	}else{
-		sprintf(message, "(0 letters)");
-		printk(KERN_INFO "Simple Driver: too many characters to deal with\n", len);
-		
-		return 0;
-	}
+static ssize_t dev_write(struct file *filep, const char *buffer, size_t len, loff_t *offset) {
+    char *input = NULL;
+    char command[4];
+    uint32_t keys[4];
+    uint32_t data_size;
+    unsigned char *data = NULL;
+    int ret;
+
+    // Allocate temporary buffer for input
+    input = kmalloc(len + 1, GFP_KERNEL);
+    if (!input) {
+        printk(KERN_ALERT "XTEA Driver: Failed to allocate input buffer\n");
+        return -ENOMEM;
+    }
+
+    // Copy data from userspace
+    if (copy_from_user(input, buffer, len)) {
+        kfree(input);
+        printk(KERN_ALERT "XTEA Driver: Failed to copy data from user\n");
+        return -EFAULT;
+    }
+    input[len] = '\0';
+
+    // Parse input: command, keys, data_size, data
+    ret = sscanf(input, "%3s %x %x %x %x %u", command, &keys[0], &keys[1], &keys[2], &keys[3], &data_size);
+    if (ret != 6 || strcmp(command, "enc") != 0 || data_size % 8 != 0 || data_size > 256) {
+        kfree(input);
+        printk(KERN_ALERT "XTEA Driver: Invalid command format or data size\n");
+        return -EINVAL;
+    }
+
+    // Allocate buffer for data
+    data = kmalloc(data_size, GFP_KERNEL);
+    if (!data) {
+        kfree(input);
+        printk(KERN_ALERT "XTEA Driver: Failed to allocate data buffer\n");
+        return -ENOMEM;
+    }
+
+    // Extract data (hex string) from input
+    char *data_start = strstr(input, " ") + 1; // Skip command
+    for (int i = 0; i < 4; i++) data_start = strstr(data_start, " ") + 1; // Skip keys
+    data_start = strstr(data_start, " ") + 1; // Skip data_size
+    for (int i = 0; i < data_size; i++) {
+        unsigned int byte;
+        if (sscanf(data_start + 2 * i, "%2x", &byte) != 1) {
+            kfree(data);
+            kfree(input);
+            printk(KERN_ALERT "XTEA Driver: Invalid data format\n");
+            return -EINVAL;
+        }
+        data[i] = (unsigned char)byte;
+    }
+
+    // Perform encryption (data_size is in bytes, process 8 bytes at a time)
+    size_of_message = 0;
+    for (size_t i = 0; i < data_size; i += 8) {
+        uint32_t v[2];
+        // Convert 8 bytes to two 32-bit words (little-endian)
+        v[0] = ((uint32_t)data[i] << 24) | ((uint32_t)data[i + 1] << 16) |
+               ((uint32_t)data[i + 2] << 8) | (uint32_t)data[i + 3];
+        v[1] = ((uint32_t)data[i + 4] << 24) | ((uint32_t)data[i + 5] << 16) |
+               ((uint32_t)data[i + 6] << 8) | (uint32_t)data[i + 7];
+        // Encrypt
+        encipher(32, v, xtea_key);
+        // Store result in message buffer
+        for (int j = 0; j < 4; j++) {
+            message[size_of_message++] = (v[0] >> (24 - j * 8)) & 0xFF;
+            message[size_of_message++] = (v[1] >> (24 - j * 8)) & 0xFF;
+        }
+    }
+
+    kfree(data);
+    kfree(input);
+    printk(KERN_INFO "XTEA Driver: Processed %zu bytes from user\n", len);
+    return len;
 }
 
-/** @brief The device release function that is called whenever the device is closed/released by
- *  the userspace program
- *  @param inodep A pointer to an inode object (defined in linux/fs.h)
- *  @param filep A pointer to a file object (defined in linux/fs.h)
+/**
+ * @brief Device release function
  */
-static int dev_release(struct inode *inodep, struct file *filep){
-	printk(KERN_INFO "Simple Driver: device successfully closed\n");
-	return 0;
+static int dev_release(struct inode *inodep, struct file *filep) {
+    printk(KERN_INFO "XTEA Driver: Device closed\n");
+    return 0;
 }
 
-/** @brief A module must use the module_init() module_exit() macros from linux/init.h, which
- *  identify the initialization function at insertion time and the cleanup function (as
- *  listed above)
- */
-module_init(simple_init);
-module_exit(simple_exit);
+module_init(xtea_init);
+module_exit(xtea_exit);
