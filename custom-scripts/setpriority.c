@@ -4,7 +4,7 @@
 #include <unistd.h>
 #include <string.h>
 #include <linux/sched.h>
-
+#define SCHED_LOW_IDLE 7
 volatile int running = 1;
 
 void *run(void *data)
@@ -36,6 +36,9 @@ void print_sched(int policy)
 			break;
 		case SCHED_IDLE:
 			printf("SCHED_IDLE");
+			break;
+		case SCHED_LOW_IDLE:
+			printf("SCHED_LOW_IDLE");
 			break;
 		default:
 			printf("unknown\n");

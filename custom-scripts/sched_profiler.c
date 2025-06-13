@@ -3,6 +3,8 @@
 #include <pthread.h>
 #include <semaphore.h>
 #include <unistd.h>
+#include <linux/sched.h>
+#define SCHED_LOW_IDLE 7
 
 
 // buffer e ponteiro global
@@ -62,14 +64,14 @@ int main(int argc, char** argv) {
 
     
 
-    if (argc != 3) {
-        fprintf(stderr, "Usage: %s <buffer_size> <num_threads>\n", argv[0]);
+    if (argc != 4) {
+        fprintf(stderr, "Usage: %s <buffer_size> <num_threads> <policy>\n", argv[0]);
         return 1;
     }
 
     buf_size = atoi(argv[1]);
     int num_threads = atoi(argv[2]);
-
+    int policy_param = atoi(argv[3]);
     if (num_threads > 26) {
         fprintf(stderr, "Number of threads should not exceed 26\n");
         return 1;
@@ -114,11 +116,42 @@ int main(int argc, char** argv) {
             return 1;
         }
 
+        
         // Escolhe a politica de escalonamento para a thread
         struct sched_param param;
-        param.sched_priority = sched_get_priority_max(SCHED_RR); // define a prioridade máxima
+        // param.sched_priority = sched_get_priority_max(SCHED_RR); // define a prioridade máxima
+        switch(policy_param){
+		case SCHED_DEADLINE:
+			printf("SCHED_DEADLINE");
+            param.sched_priority = sched_get_priority_max(SCHED_DEADLINE);
+			break;
+		case SCHED_FIFO:
+			printf("SCHED_FIFO");
+            param.sched_priority = sched_get_priority_max(SCHED_FIFO);
+			break;
+		case SCHED_RR:
+			printf("SCHED_RR");
+            param.sched_priority = sched_get_priority_max(SCHED_RR);
+			break;
+		case SCHED_BATCH:
+			printf("SCHED_BATCH");
+            param.sched_priority = sched_get_priority_max(SCHED_BATCH);
+			break;
+		case SCHED_IDLE:
+			printf("SCHED_IDLE");
+            param.sched_priority = sched_get_priority_max(SCHED_IDLE);
+			break;
+		case SCHED_LOW_IDLE:
+			printf("SCHED_LOW_IDLE");
+            param.sched_priority = sched_get_priority_max(SCHED_LOW_IDLE);
+			break;
+		default:
+			printf("SCHED_OTHER");
+            param.sched_priority = sched_get_priority_max(SCHED_NORMAL);
+			break;
+	    }
 
-        if (pthread_setschedparam(threads[i], SCHED_RR, &param) != 0) {
+        if (pthread_setschedparam(threads[i], policy_param, &param) != 0) {
             perror("Failed to set scheduling policy");
             return 1;
         }
@@ -132,7 +165,8 @@ int main(int argc, char** argv) {
         printf("Thread %d: policy=%s, priority=%d\n", i, 
                (policy == SCHED_RR) ? "SCHED_RR" : 
                (policy == SCHED_FIFO) ? "SCHED_FIFO" : 
-               (policy == SCHED_OTHER) ? "SCHED_OTHER" : "UNKNOWN", 
+               (policy == SCHED_LOW_IDLE) ? "SCHED_LOW_IDLE" : 
+               (policy == SCHED_IDLE) ? "SCHED_IDLE" : 
                param.sched_priority);
 
     }
